@@ -17,16 +17,17 @@ done
 ALPINE=3.24
 ROOTFS=alpine-minirootfs-3.24.3-riscv64.tar.gz
 ROOTFS_SHA256=9714553757e7bf645eff5dcc52bdd206f358a7bed77874842567852e8326a51d
-KERNEL_APK=linux-lts-6.18.58-r0.apk
 MIRROR=https://dl-cdn.alpinelinux.org/alpine/v$ALPINE
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 curl -sSfL -o "$work/$ROOTFS" "$MIRROR/releases/riscv64/$ROOTFS"
 echo "$ROOTFS_SHA256  $work/$ROOTFS" | sha256sum -c -
-curl -sSfL -o "$work/$KERNEL_APK" "$MIRROR/main/riscv64/$KERNEL_APK"
+# The mirror keeps only the newest build of each package, so the kernel is whichever linux-lts
+# the index lists, checked against it like the other packages. Only its image is used.
+python3 tools/alpine-packages.py --no-deps "$work/$ROOTFS" "$work/kernel-apk" linux-lts
 mkdir "$work/kernel"
-tar -xzf "$work/$KERNEL_APK" -C "$work/kernel" boot/vmlinuz-lts 2>/dev/null
+tar -xzf "$work"/kernel-apk/linux-lts-*.apk -C "$work/kernel" boot/vmlinuz-lts 2>/dev/null
 mkdir -p linux64
 gunzip -c "$work/kernel/boot/vmlinuz-lts" > linux64/Image
 python3 tools/alpine-packages.py "$work/$ROOTFS" "$work/apk" $PACKAGES

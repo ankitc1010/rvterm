@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Downloads Alpine riscv64 packages, with their dependencies, to bake into the 64-bit initramfs.
 
-Usage: python3 alpine-packages.py <minirootfs.tar.gz> <out dir> <package>...
+Usage: python3 alpine-packages.py [--no-deps] <minirootfs.tar.gz> <out dir> <package>...
 
 Packages the minirootfs already has (its /lib/apk/db/installed) are skipped. Each download is
 checked against the index: an apk's "C:" field is "Q1" + base64(SHA-1) of its control segment,
-the second gzip member of the file.
+the second gzip member of the file. With --no-deps only the named packages are fetched: the
+kernel package is wanted for its image alone.
 """
 import base64
 import hashlib
@@ -53,7 +54,9 @@ def control_sha1(apk):
 
 
 def main():
-    rootfs, out_dir, wanted = sys.argv[1], sys.argv[2], sys.argv[3:]
+    with_deps = "--no-deps" not in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--no-deps"]
+    rootfs, out_dir, wanted = args[0], args[1], args[2:]
     with tarfile.open(rootfs, "r:gz") as tar:
         member = next(m for m in tar.getmembers() if m.name.lstrip("./") == "lib/apk/db/installed")
         installed = {l[2:] for l in tar.extractfile(member).read().decode().splitlines() if l.startswith("P:")}
@@ -74,6 +77,8 @@ def main():
         if name not in packages:
             sys.exit(f"alpine-packages: no package provides {name}")
         chosen.append(name)
+        if not with_deps:
+            return
         for dep in packages[name].get("D", "").split():
             if not dep.startswith("!"):
                 add(dep.split("=")[0].split(">")[0].split("<")[0].split("~")[0])
