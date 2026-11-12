@@ -1,0 +1,370 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIDAA Probe</title>
+<style>
+  body { background: #111; color: #eee; font-family: monospace, sans-serif; font-size: 20px; margin: 36px 60px; }
+  h1 { font-size: 32px; margin: 0 0 8px; }
+  h2 { font-size: 24px; margin: 18px 0 4px; color: #fc0; }
+  .row { padding: 1px 0; word-wrap: break-word; }
+  .ok { color: #6f6; } .no { color: #f66; } .info { color: #9cf; }
+  button { font-size: 22px; padding: 10px 22px; margin: 6px 12px 6px 0; background: #333; color: #fff; border: 3px solid #555; }
+  button:focus { border-color: #fc0; outline: none; }
+  #status { color: #fc0; margin: 8px 0; font-size: 24px; }
+  #keys { color: #9cf; margin: 8px 0; }
+  .cols { -webkit-column-count: 2; column-count: 2; -webkit-column-gap: 40px; column-gap: 40px; }
+</style>
+</head>
+<body>
+<h1>VIDAA capability probe</h1>
+<div id="status">Running checks...</div>
+<div>
+  <button id="btnMem" autofocus>Memory test (may crash the browser)</button>
+  <button id="btnSend">Send report again</button>
+</div>
+<div id="keys">Press keys on the remote or keyboard to log them.</div>
+<div id="out" class="cols"></div>
+
+<!-- ES5 only: this page must run on old TV engines, so no let/const, arrows, fetch or promises outside feature checks. -->
+<script>
+(function () {
+  var report = { time: new Date().toString(), results: {}, keys: [], memory: null, errors: [] };
+  var out = document.getElementById('out');
+  var statusEl = document.getElementById('status');
+  var wasmBench = null;
+
+  window.onerror = function (msg, src, line) { report.errors.push(msg + ' @' + line); };
+
+  function status(text) { statusEl.innerHTML = ''; statusEl.appendChild(document.createTextNode(text)); }
+
+  function heading(text) {
+    var h = document.createElement('h2');
+    h.appendChild(document.createTextNode(text));
+    out.appendChild(h);
+  }
+
+  function set(name, value) {
+    report.results[name] = value;
+    var div = document.createElement('div');
+    div.className = 'row ' + (value === true ? 'ok' : value === false ? 'no' : 'info');
+    div.appendChild(document.createTextNode(name + ': ' + String(value)));
+    out.appendChild(div);
+  }
+
+  function check(name, fn) {
+    try { set(name, fn()); } catch (e) { set(name, 'error: ' + e.message); }
+  }
+
+  // Compiles a snippet without running it, to detect syntax support.
+  function syntax(name, src) {
+    try { new Function(src); set(name, true); } catch (e) { set(name, false); }
+  }
+
+  function post() {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/report', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.send(JSON.stringify(report));
+    } catch (e) { /* No server, the on-screen results still work. */ }
+  }
+
+  // Hand-assembled WebAssembly modules (validated in Node before shipping).
+  var H = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+  var VOID_TYPE = [0x01, 0x04, 0x01, 0x60, 0x00, 0x00], ONE_FUNC = [0x03, 0x02, 0x01, 0x00];
+  function code(body) { return [0x0a, body.length + 2, 0x01, body.length].concat(body); }
+  var BENCH = H.concat([0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f], ONE_FUNC,
+    [0x07, 0x09, 0x01, 0x05, 0x62, 0x65, 0x6e, 0x63, 0x68, 0x00, 0x00],
+    code([0x01, 0x01, 0x7f, 0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x45, 0x0d, 0x01, 0x20, 0x01, 0x41, 0x1f, 0x6c,
+      0x20, 0x00, 0x6a, 0x21, 0x01, 0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x01, 0x0b]));
+  var FEATURES = {
+    signExt: H.concat(VOID_TYPE, ONE_FUNC, code([0x00, 0x41, 0x00, 0xc0, 0x1a, 0x0b])),
+    satConv: H.concat(VOID_TYPE, ONE_FUNC, code([0x00, 0x43, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x1a, 0x0b])),
+    bulkMemory: H.concat(VOID_TYPE, ONE_FUNC, [0x05, 0x03, 0x01, 0x00, 0x01],
+      code([0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x00, 0x0b])),
+    simd: H.concat(VOID_TYPE, ONE_FUNC, code([0x00, 0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x0b])),
+    multiValue: H.concat([0x01, 0x06, 0x01, 0x60, 0x00, 0x02, 0x7f, 0x7f], ONE_FUNC, code([0x00, 0x41, 0x00, 0x41, 0x00, 0x0b])),
+    refTypes: H.concat(VOID_TYPE, ONE_FUNC, code([0x00, 0xd0, 0x70, 0x1a, 0x0b])),
+    threads: H.concat([0x05, 0x04, 0x01, 0x03, 0x01, 0x01]),
+    mutableGlobals: H.concat([0x02, 0x08, 0x01, 0x01, 0x61, 0x01, 0x62, 0x03, 0x7f, 0x01])
+  };
+
+  function jsBench(n) { var acc = 0; while (n) { acc = (Math.imul(acc, 31) + n) | 0; n--; } return acc; }
+  function now() { return window.performance && performance.now ? performance.now() : Date.now(); }
+
+  function runSync() {
+    heading('Device');
+    check('userAgent', function () { return navigator.userAgent; });
+    check('platform', function () { return navigator.platform; });
+    check('screen', function () { return screen.width + 'x' + screen.height + ' dpr ' + window.devicePixelRatio; });
+    check('viewport', function () { return window.innerWidth + 'x' + window.innerHeight; });
+    check('cpuCores', function () { return navigator.hardwareConcurrency || 'unknown'; });
+    check('deviceMemoryGB', function () { return navigator.deviceMemory || 'unknown'; });
+    check('jsHeapLimitMB', function () {
+      return window.performance && performance.memory ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : 'unknown';
+    });
+    check('protocol', function () { return location.protocol; });
+    check('secureContext', function () { return window.isSecureContext === true; });
+
+    heading('VIDAA / TV APIs');
+    check('vendorGlobals', function () {
+      var names = Object.getOwnPropertyNames(window), found = [];
+      for (var i = 0; i < names.length; i++) {
+        if (/hisense|vidaa|hbbtv|oipf/i.test(names[i]) || /^Hi[A-Z_]/.test(names[i])) found.push(names[i]);
+      }
+      return found.length ? found.join(', ') : 'none visible';
+    });
+    check('mimeTypes', function () {
+      var types = [];
+      for (var i = 0; i < navigator.mimeTypes.length; i++) types.push(navigator.mimeTypes[i].type);
+      return types.length ? types.join(', ') : 'none';
+    });
+
+    heading('TV info (read-only Hisense calls)');
+    var INFO = ['ApiVersion', 'ChromiumVersion', 'CurrentBrowser', 'FirmWareVersion', 'OSVersion', 'ModelName',
+      'ChipSetName', 'Brand', 'VersionStatus', 'CapabilityCode', 'FeatureCode', 'PanelResolution', 'CountryCode'];
+    for (var j = 0; j < INFO.length; j++) {
+      (function (n) {
+        var fn = window['Hisense_Get' + n];
+        if (typeof fn !== 'function') { set('tv.' + n, 'not available'); return; }
+        check('tv.' + n, function () {
+          // Some calls may answer through a callback instead of returning a value.
+          var r = fn(function (v) { set('tv.' + n + '.callback', typeof v === 'object' ? JSON.stringify(v) : v); post(); });
+          return r === undefined ? 'undefined' : typeof r === 'object' ? JSON.stringify(r) : r;
+        });
+      })(INFO[j]);
+    }
+
+    // Read-only: how the Hisense functions are implemented. Built-in ones print "[native code]";
+    // JavaScript wrappers show their source, which reveals what requests HiUtils_createRequest supports.
+    heading('Hisense internals (read-only)');
+    check('vendorSources', function () {
+      var names = Object.getOwnPropertyNames(window), sources = {}, native = 0, js = 0;
+      for (var i = 0; i < names.length; i++) {
+        var n = names[i];
+        if (!/^(Hisense|HiUtils_|CreateOipfObject|oipfObjectFactory)/.test(n)) continue;
+        var v = window[n], src;
+        try { src = typeof v === 'function' ? Function.prototype.toString.call(v) : typeof v; } catch (e) { src = 'error: ' + e.message; }
+        sources[n] = src.length > 20000 ? src.slice(0, 20000) : src;
+        if (/\[native code\]/.test(src)) native++; else js++;
+      }
+      report.vendorSources = sources;
+      return native + ' native, ' + js + ' JavaScript (full text saved in the report)';
+    });
+    // Read-only walk of the platform bridges the Hisense wrappers call (vowOS.service.syncExecute,
+    // omi_platform.sendPlatformMessage, TvInfo_*): names and function source only, nothing is called.
+    check('platformObjects', function () {
+      var found = {}, globals = Object.getOwnPropertyNames(window), roots = [];
+      report.allGlobals = globals;
+      for (var g = 0; g < globals.length; g++) {
+        if (/^(vow|omi|TvInfo|tvinfo|hiutils|HiUtils|webOS|tizen|PalmSystem|Android|jsBridge|native)/i.test(globals[g])) roots.push(globals[g]);
+      }
+      function walk(path, obj, depth) {
+        var names;
+        try {
+          names = Object.getOwnPropertyNames(obj);
+          for (var k in obj) if (names.indexOf(k) < 0) names.push(k);
+        } catch (e) { found[path] = 'error: ' + e.message; return; }
+        for (var i = 0; i < names.length && i < 300; i++) {
+          var p = path + '.' + names[i], v;
+          try { v = obj[names[i]]; } catch (e) { found[p] = 'getter threw'; continue; }
+          if (typeof v === 'function') {
+            var s = Function.prototype.toString.call(v);
+            found[p] = s.length > 6000 ? s.slice(0, 6000) : s;
+          } else if (v && typeof v === 'object' && depth < 4) {
+            found[p] = 'object';
+            walk(p, v, depth + 1);
+          } else {
+            found[p] = typeof v + (v !== null && typeof v !== 'object' && typeof v !== 'undefined' ? ': ' + String(v).slice(0, 300) : '');
+          }
+        }
+      }
+      for (var r = 0; r < roots.length; r++) {
+        var root = window[roots[r]];
+        if (typeof root === 'function') found[roots[r]] = Function.prototype.toString.call(root).slice(0, 6000);
+        else if (root && typeof root === 'object') walk(roots[r], root, 0);
+        else found[roots[r]] = typeof root;
+      }
+      report.platformObjects = found;
+      var count = 0;
+      for (var key in found) count++;
+      return roots.join(', ') + ' (' + count + ' entries saved in the report)';
+    });
+    check('Hisense.members', function () {
+      if (!window.Hisense) return 'not available';
+      var out = [];
+      for (var k in window.Hisense) out.push(k + ':' + typeof window.Hisense[k]);
+      var own = Object.getOwnPropertyNames(window.Hisense);
+      for (var j = 0; j < own.length; j++) if (out.join(',').indexOf(own[j] + ':') < 0) out.push(own[j] + ':' + typeof window.Hisense[own[j]]);
+      report.hisenseMembers = out;
+      return out.length + ' members (saved in the report)';
+    });
+
+    // Read-only: the app list that newer firmware installs into (same call vidaa-edge makes before writing).
+    // The full file is kept in the report as a backup in case a later install needs undoing.
+    check('appInfo.fileRead', function () {
+      if (typeof window.HiUtils_createRequest !== 'function') return 'not available';
+      var r = HiUtils_createRequest('fileRead', { path: 'websdk/Appinfo.json', mode: 6 });
+      if (!r || !r.ret) return 'failed: ' + (r ? r.msg : 'no result');
+      report.appInfoBackup = r.msg;
+      var apps = JSON.parse(r.msg).AppInfo || [], names = [];
+      for (var i = 0; i < apps.length; i++) names.push(apps[i].AppName);
+      return 'ok, ' + apps.length + ' apps: ' + names.join(', ');
+    });
+
+    heading('JavaScript');
+    syntax('letConst', 'let a = 1; const b = 2;');
+    syntax('arrowFunctions', 'var f = (x) => x;');
+    syntax('classes', 'class A {}');
+    syntax('templateLiterals', 'var s = `x`;');
+    syntax('asyncAwait', 'async function f() { await 1; }');
+    syntax('optionalChaining', 'var a = {}; return a?.b;');
+    syntax('nullishCoalescing', 'return null ?? 1;');
+    syntax('bigIntLiteral', 'return 1n;');
+    check('Promise', function () { return typeof Promise === 'function'; });
+    check('Proxy', function () { return typeof Proxy === 'function'; });
+    check('fetch', function () { return typeof fetch === 'function'; });
+    check('TextDecoder', function () { return typeof TextDecoder === 'function'; });
+    check('Worker', function () { return typeof Worker === 'function'; });
+    check('blobWorker', function () {
+      var url = URL.createObjectURL(new Blob(['self.onmessage=function(){}'], { type: 'text/javascript' }));
+      new Worker(url).terminate();
+      return true;
+    });
+    check('ResizeObserver', function () { return typeof ResizeObserver === 'function'; });
+
+    heading('Storage');
+    check('localStorage', function () {
+      localStorage.setItem('probe', '1');
+      var ok = localStorage.getItem('probe') === '1';
+      localStorage.removeItem('probe');
+      return ok;
+    });
+    check('indexedDB', function () { return !!window.indexedDB; });
+    check('serviceWorker', function () { return 'serviceWorker' in navigator; });
+    check('cacheStorage', function () { return 'caches' in window; });
+
+    heading('Graphics');
+    check('canvas2d', function () { return !!document.createElement('canvas').getContext('2d'); });
+    check('webgl', function () { return !!document.createElement('canvas').getContext('webgl'); });
+    check('webgl2', function () { return !!document.createElement('canvas').getContext('webgl2'); });
+
+    heading('WebAssembly');
+    check('WebAssembly', function () { return typeof WebAssembly === 'object'; });
+    check('instantiateStreaming', function () { return typeof WebAssembly.instantiateStreaming === 'function'; });
+    for (var name in FEATURES) {
+      (function (n) {
+        check('wasm.' + n, function () { return WebAssembly.validate(new Uint8Array(FEATURES[n])); });
+      })(name);
+    }
+    check('SharedArrayBuffer', function () { return typeof SharedArrayBuffer === 'function'; });
+    check('crossOriginIsolated', function () { return window.crossOriginIsolated === true; });
+  }
+
+  function runAsync(done) {
+    var pending = 0, finished = false;
+    function start() { pending++; }
+    function end() { if (--pending === 0 && !finished) { finished = true; done(); } }
+    setTimeout(function () { if (!finished) { finished = true; done(); } }, 6000);
+
+    heading('Async checks');
+    start();
+    try {
+      var req = indexedDB.open('probe', 1);
+      req.onsuccess = function () { set('indexedDB.open', true); req.result.close(); end(); };
+      req.onerror = function () { set('indexedDB.open', false); end(); };
+    } catch (e) { set('indexedDB.open', 'error: ' + e.message); end(); }
+
+    start();
+    try {
+      navigator.storage.estimate().then(function (est) {
+        set('storageQuotaMB', Math.round(est.quota / 1048576));
+        end();
+      }, function (e) { set('storageQuotaMB', 'error: ' + e); end(); });
+    } catch (e) { set('storageQuotaMB', 'unknown'); end(); }
+
+    start();
+    try {
+      WebAssembly.instantiate(new Uint8Array(BENCH)).then(function (r) {
+        wasmBench = r.instance.exports.bench;
+        set('wasm.instantiate', true);
+        end();
+      }, function (e) { set('wasm.instantiate', 'error: ' + e); end(); });
+    } catch (e) { set('wasm.instantiate', 'error: ' + e.message); end(); }
+  }
+
+  function runBench() {
+    var n = 30000000;
+    heading('Speed (lower is faster; compare with a PC)');
+    var t = now(), jsResult = jsBench(n);
+    set('jsLoopMs', Math.round(now() - t));
+    if (wasmBench) {
+      t = now();
+      var wasmResult = wasmBench(n);
+      set('wasmLoopMs', Math.round(now() - t));
+      set('wasmResultMatchesJs', wasmResult === jsResult);
+    }
+  }
+
+  // Grows WebAssembly memory in 64 MiB steps and touches every page, which is what an emulator's guest RAM does.
+  function memTest() {
+    var STEP = 1024, LIMIT_MB = 1024, mem = null, mb = 0;
+    status('Memory test running...');
+    function touch(fromMB) {
+      var bytes = new Uint8Array(mem.buffer);
+      for (var i = fromMB * 1048576; i < bytes.length; i += 4096) bytes[i] = 1;
+    }
+    function finish(reason) {
+      report.memory = { maxWasmMB: mb, stoppedBecause: reason };
+      post();
+      status('Memory test done: ' + mb + ' MB (' + reason + ')');
+      set('maxWasmMemoryMB', mb + ' (' + reason + ')');
+      mem = null;
+    }
+    function step() {
+      try {
+        if (!mem) { mem = new WebAssembly.Memory({ initial: STEP }); } else { mem.grow(STEP); }
+        touch(mb);
+        mb += 64;
+        report.memory = { maxWasmMB: mb, stoppedBecause: 'still running' };
+        post();
+        status('Memory test: ' + mb + ' MB OK');
+        if (mb >= LIMIT_MB) { finish('reached ' + LIMIT_MB + ' MB limit'); return; }
+        setTimeout(step, 300);
+      } catch (e) { finish('error: ' + e.message); }
+    }
+    step();
+  }
+
+  var keyPostTimer = null;
+  document.addEventListener('keydown', function (e) {
+    report.keys.push({ key: e.key, code: e.code, keyCode: e.keyCode, which: e.which });
+    if (report.keys.length > 60) report.keys.shift();
+    var last = report.keys.slice(-5), parts = [];
+    for (var i = 0; i < last.length; i++) parts.push((last[i].key || '?') + '/' + last[i].keyCode);
+    var keysEl = document.getElementById('keys');
+    keysEl.innerHTML = '';
+    keysEl.appendChild(document.createTextNode('Keys (key/keyCode): ' + parts.join('  ')));
+    clearTimeout(keyPostTimer);
+    keyPostTimer = setTimeout(post, 1000);
+  });
+  document.getElementById('btnMem').onclick = memTest;
+  document.getElementById('btnSend').onclick = function () { post(); status('Report sent.'); };
+
+  runSync();
+  post();
+  runAsync(function () {
+    post();
+    status('Measuring speed...');
+    setTimeout(function () {
+      try { runBench(); } catch (e) { set('bench', 'error: ' + e.message); }
+      post();
+      status('Done. Results were sent to the computer. Try the memory test and press some remote keys next.');
+    }, 200);
+  });
+})();
+</script>
+</body>
+</html>

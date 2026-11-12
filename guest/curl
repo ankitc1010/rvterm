@@ -1,0 +1,184 @@
+#!/bin/sh
+# curl for rvterm. The emulated machine has no network card, so the request goes to the page
+# running it, framed as ESC ] 7777 ; base64 BEL on the console, and the page performs it with the
+# browser's fetch(). The reply arrives as typed input: "<code> <text>\n<n>\n<headers><n>\n<body>",
+# with code 0 for a failure. Browsers only let a page read sites that allow cross-origin requests.
+
+tty=/dev/console
+tmp=/tmp/.curl.$$
+method= url= out= remote= include= fail= silent= verbose= wout= data= hasdata= headers=
+
+usage() {
+    echo 'Usage: curl [options] <url>'
+    echo ' -d, --data <data>       send data with POST; @file reads it from a file'
+    echo ' -f, --fail              fail on HTTP errors, without output'
+    echo ' -H, --header <line>     add a request header'
+    echo ' -i, --include           include the response headers in the output'
+    echo ' -I, --head              fetch the headers only'
+    echo ' -o, --output <file>     write to a file instead of stdout'
+    echo ' -O, --remote-name       write to a file named after the remote file'
+    echo ' -s, --silent            no error messages'
+    echo ' -u, --user <user:pass>  HTTP basic authentication'
+    echo ' -v, --verbose           show the request line and response headers'
+    echo ' -w, --write-out <fmt>   print fmt when done; %{http_code} is the status'
+    echo ' -X, --request <method>  request method'
+    echo ' -A, --user-agent <ua>   send a User-Agent (browsers may ignore it)'
+    echo 'Accepted and ignored: -L -S -k --compressed. Redirects are always followed.'
+}
+
+die() { # die <exit code> <message>
+    [ -n "$silent" ] || echo "curl: ($1) $2" >&2
+    exit "$1"
+}
+
+set_arg() { # set_arg <option letter> <value>
+    case "$1" in
+    o) out=$2 ;;
+    X) method=$2 ;;
+    H) headers="$headers$2
+" ;;
+    d) data="${data:+$data&}$2"
+        hasdata=1 ;;
+    u) headers="${headers}Authorization: Basic $(printf '%s' "$2" | uuencode -m - | sed -n 2p)
+" ;;
+    A) headers="${headers}User-Agent: $2
+" ;;
+    w) wout=$2 ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    case "$a" in
+    --output|--request|--header|--data|--data-raw|--data-binary|--data-ascii|--user|--user-agent|--write-out|--url)
+        [ $# -gt 0 ] || die 2 "option $a: requires an argument"
+        case "$a" in
+        --output) set_arg o "$1" ;;
+        --request) set_arg X "$1" ;;
+        --header) set_arg H "$1" ;;
+        --user) set_arg u "$1" ;;
+        --user-agent) set_arg A "$1" ;;
+        --write-out) set_arg w "$1" ;;
+        --url) url=$1 ;;
+        *) set_arg d "$1" ;;
+        esac
+        shift ;;
+    --silent) silent=1 ;;
+    --fail) fail=1 ;;
+    --include) include=1 ;;
+    --head) method=HEAD include=1 ;;
+    --remote-name) remote=1 ;;
+    --verbose) verbose=1 ;;
+    --help) usage; exit 0 ;;
+    --location|--insecure|--compressed|--show-error|--disable) ;;
+    --*) die 2 "option $a: is unknown" ;;
+    -?*)
+        flags=${a#-}
+        while [ -n "$flags" ]; do
+            c=${flags%"${flags#?}"}
+            flags=${flags#?}
+            case "$c" in
+            s) silent=1 ;;
+            f) fail=1 ;;
+            i) include=1 ;;
+            I) method=HEAD include=1 ;;
+            O) remote=1 ;;
+            v) verbose=1 ;;
+            h) usage; exit 0 ;;
+            L|S|k|q) ;;
+            o|X|H|d|u|A|w)
+                if [ -n "$flags" ]; then
+                    v=$flags
+                    flags=
+                else
+                    [ $# -gt 0 ] || die 2 "option -$c: requires an argument"
+                    v=$1
+                    shift
+                fi
+                set_arg "$c" "$v" ;;
+            *) die 2 "option -$c: is unknown" ;;
+            esac
+        done ;;
+    *) url=$a ;;
+    esac
+done
+
+[ -n "$url" ] || { usage >&2; exit 2; }
+case "$url" in *://*) ;; *) url="http://$url" ;; esac
+if [ -n "$hasdata" ]; then
+    [ -n "$method" ] || method=POST
+    case "$headers" in
+    *[Cc]ontent-[Tt]ype:*) ;;
+    *) headers="${headers}Content-Type: application/x-www-form-urlencoded
+" ;;
+    esac
+fi
+[ -n "$method" ] || method=GET
+[ "$out" != - ] || out= # -o - (or -o-) means standard output, as in real curl
+if [ -n "$remote" ]; then
+    out=${url##*/}
+    out=${out%%\?*}
+    [ -n "$out" ] || die 23 "Remote file name has no length"
+fi
+
+request() {
+    printf 'curl\n%s\n%s\n%s\n' "$method" "$url" "$headers"
+    if [ -n "$hasdata" ]; then
+        case "$data" in
+        @*) cat "${data#@}" ;;
+        *) printf '%s' "$data" ;;
+        esac
+    fi
+}
+
+# Reads exactly $1 bytes from the console: dd caps each read at what is left; head -c reads ahead.
+take() {
+    dd bs=65536 count="$1" iflag=fullblock,count_bytes 2>/dev/null < $tty
+}
+
+# One request at a time: the console carries a single request/reply stream, and some installers
+# (nvm, for one) run several downloads in parallel. mkdir is atomic; a lock whose owner has died
+# is taken over.
+lock=/tmp/.curl.lock
+until mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/pid" 2>/dev/null)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock"
+        continue
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+done
+echo $$ > "$lock/pid"
+
+saved=$(stty -g < $tty)
+trap 'stty "$saved" < $tty; rm -f "$tmp.h" "$tmp.b"; rm -rf "$lock"' EXIT
+trap 'exit 130' INT TERM
+stty raw -echo < $tty
+{ printf '\033]7777;'; request | uuencode -m -; printf '\007'; } > $tty
+read -r code text < $tty
+read -r hlen < $tty
+take "$hlen" > "$tmp.h"
+read -r blen < $tty
+take "$blen" > "${out:-$tmp.b}"
+stty "$saved" < $tty
+rm -rf "$lock"
+trap 'rm -f "$tmp.h" "$tmp.b"' EXIT
+
+[ "$code" != 0 ] || die 7 "$text"
+if [ -n "$verbose" ]; then
+    printf '> %s %s\n' "$method" "$url" >&2
+    sed 's/^/< /' "$tmp.h" >&2
+fi
+if [ -n "$fail" ] && [ "$code" -ge 400 ]; then
+    [ -z "$out" ] || rm -f "$out"
+    die 22 "The requested URL returned error: $code"
+fi
+if [ -z "$out" ]; then
+    [ -z "$include" ] || cat "$tmp.h"
+    cat "$tmp.b"
+elif [ -n "$include" ]; then
+    cat "$tmp.h" "$out" > "$tmp.b" && mv "$tmp.b" "$out"
+fi
+[ -z "$wout" ] || printf '%b' "$(printf '%s' "$wout" | sed "s/%{http_code}/$code/g")"
+exit 0

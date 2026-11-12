@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rvterm</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
+  canvas { display: block; }
+  #status { position: fixed; top: 0; right: 0; bottom: 0; left: 0; display: flex; align-items: center; justify-content: center;
+            color: #8b95a7; font: 24px sans-serif; white-space: pre-wrap; text-align: center; }
+  /* The TV's on-screen keyboard only attaches to a visible text field, so typing goes through this bar. */
+  #kbd { position: fixed; left: 0; right: 0; bottom: 0; height: 52px; box-sizing: border-box; display: none;
+         padding: 0 16px; border: 0; border-top: 2px solid #61afef; outline: none;
+         background: #1c2129; color: #d8dee9; font: 26px monospace; }
+  #kbd::placeholder { color: #5c6370; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<input id="kbd" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+       placeholder="Type here: each key goes straight to the terminal">
+<div id="status">Starting Linux…</div>
+<script src="term.js"></script>
+</body>
+</html>
