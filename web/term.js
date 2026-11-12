@@ -8,16 +8,12 @@ const FRAME_MS = 12; // emulator time per animation frame, leaving room to draw
 // While the guest idles, wake at most every 30-100 ms: Linux catches up on late timer ticks,
 // and keystrokes wake the loop immediately, so this only trims idle CPU (~116 to ~30 wakes/s).
 const IDLE_MIN_MS = 30, IDLE_MAX_MS = 100;
-const TYPING_MS = 500; // after a keystroke, follow the guest's own 10 ms UART polling instead
-const MAX_DEBT_US = 200000; // how far guest time may run ahead to deliver keys early
-const CHASE_TICKS = 6; // guest timer ticks to skip after a keystroke: UART read, then the echo
-// Two machines: 64-bit Alpine Linux by default, or the small 32-bit BusyBox one with ?rv32.
-// ?node picks the 64-bit snapshot with Node.js (zig build -Dnode): about 3x the download.
-// ?claude picks Node.js and Claude Code on a 1 GB machine (zig build -Dclaude): desktop browsers only.
-const MACHINE = /[?&]rv32\b/.test(location.search) ? '' : '64';
-const VARIANT = !MACHINE ? '' : /[?&]claude\b/.test(location.search) ? 'claude' : /[?&]node\b/.test(location.search) ? 'node' : '';
-const WASM = `rvterm${MACHINE}${VARIANT === 'claude' ? '-1g' : ''}.wasm`;
-const SNAPSHOT = `snapshot${MACHINE}${VARIANT ? `-${VARIANT}` : ''}.bin.gz`;
+const TYPING_MS = 500; // after a keystroke, wake for each of the guest's timers instead
+const MAX_DEBT_US = 200000; // how far guest time may run ahead to answer keys early
+const CHASE_TICKS = 6; // guest timers to skip ahead to after a keystroke, until the guest answers it
+// The machine (64-bit RISC-V) and its snapshot: Alpine Linux with Node.js, at a shell prompt.
+const WASM = 'rvterm64.wasm';
+const SNAPSHOT = 'snapshot64.bin.gz';
 
 // Cell layout from vt.zig: u32 codepoint, then fg, bg, attr bytes.
 const BOLD = 1, DIM = 2, UNDERLINE = 4, REVERSE = 8, FG_SET = 16, BG_SET = 32;
@@ -82,12 +78,6 @@ function views() {
 
 async function fetchOk(url) {
   const res = await fetch(url);
-  // The optional machines are only on servers that built them; the public site never has ?claude.
-  if (res.status === 404 && VARIANT) {
-    throw new Error(`?${VARIANT} is not available on this site (${url} is missing).\n` + (VARIANT === 'claude'
-      ? 'Claude Code is proprietary, so that machine is not published:\nbuild it for your own use with zig build -Dclaude and serve it yourself.'
-      : 'Build it with zig build -Dnode.'));
-  }
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   return res;
 }
@@ -102,7 +92,7 @@ function loadSnapshot(bytes) {
 }
 
 // Puts the machine back exactly as the snapshot tool left it: at a shell prompt. The fresh random
-// bytes become the 64-bit guest's new VM generation ID, which makes Linux reseed its random number
+// bytes become the guest's new VM generation ID, which makes Linux reseed its random number
 // generator, so each session gets its own random numbers rather than the snapshot's.
 function restore() {
   views();
@@ -234,10 +224,10 @@ function tick() {
   do {
     feedInput();
     exit = ex.run(SLICE, elapsedUs());
-    // The UART has no interrupt, so Linux reads input and sends output only from a 10 ms timer.
-    // While input is waiting, and after a keystroke until the guest answers, jump guest time to
-    // that timer instead of waiting. Keystroke jumps are repaid from later slices so the clock
-    // stays true; jumps that feed a transfer (a curl reply) just move the guest clock ahead.
+    // An idle guest is waiting for its next timer. While input is waiting in the UART, and after
+    // a keystroke until the guest answers it, jump guest time to that timer instead of waiting.
+    // Keystroke jumps are repaid from later slices so the clock stays true; jumps that feed a
+    // transfer (a curl reply) just move the guest clock ahead.
     while (exit === EXIT_IDLE && performance.now() - start < FRAME_MS) {
       feedInput();
       const waiting = ex.input_pending() > 0;
@@ -336,7 +326,7 @@ function send(text) {
 // <header lines>\n\n<body>". The page performs it and types back, as raw bytes,
 // "<code> <text>\n<n>\n<n bytes of headers><n>\n<n bytes of body>"; code 0 means it failed.
 const host = { busy: false, abort: null, held: [] };
-const MAX_REPLY = 16 << 20; // the guest has 64 MB of RAM in all
+const MAX_REPLY = 16 << 20; // the guest keeps a reply in RAM: its files live there too
 
 function checkHost() {
   const len = ex.host_request_len();

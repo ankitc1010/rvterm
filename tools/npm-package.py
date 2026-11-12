@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Downloads an npm package tarball to bake into the 64-bit initramfs (see mkinitrd.py).
+"""Downloads an npm package tarball to bake into the initramfs (see mkinitrd.py).
 
 Usage: python3 npm-package.py <name@version> <out dir>
 
 The tarball is checked against the registry's "integrity" (sha512) before it is saved. Only the
-package itself is fetched, not its dependencies: this is for self-contained bundles such as
-Claude Code's cli.js.
+package itself is fetched, not its dependencies: this is for packages that bundle all they need.
 """
 import base64
 import hashlib

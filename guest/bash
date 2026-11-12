@@ -1,4 +1,0 @@
-#!/bin/sh
-# There is no real bash on this machine: this runs BusyBox's hush shell, which understands the
-# common bash syntax ($(...), $((...)), [[ ]], functions), so simple bash scripts and `| bash` work.
-exec /bin/sh "$@"

@@ -1,7 +1,7 @@
 // Boots 64-bit Alpine Linux in the wasm emulator and saves the machine at a shell prompt, so the
-// page starts instantly instead of booting (about 450M instructions). See snapshot.mjs for the format.
+// page starts instantly instead of booting (about 2 billion instructions). See snapshot.mjs for the format.
 // Usage: node mksnapshot64.mjs <rvterm64.wasm> <kernel Image> <initrd.cpio.gz> <out snapshot64.bin.gz> [guest files...]
-// Guest files (guest/curl, guest/bash, ...) are installed into /usr/local/bin.
+// Guest files (guest/curl) are installed into /usr/local/bin.
 
 import { randomFillSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';

@@ -1,51 +1,22 @@
-//! WebAssembly entry points, for either machine (chosen at build time by `machine64`):
-//!   32-bit: cpu.zig, RV32IMA without an MMU, running a no-MMU Linux + BusyBox (the small one)
-//!   64-bit: rv64.zig + machine64.zig, RV64GC with Sv39, running Alpine Linux
-//! The emulator, its UART input queue and the terminal grid all live in linear memory: guest output
-//! goes straight into the terminal without crossing into JS. The page writes key bytes into
-//! `input`, calls run(), then redraws the rows marked dirty.
+//! WebAssembly entry points for the machine in rv64.zig and machine64.zig: RV64GC with Sv39,
+//! running Alpine Linux. The emulator, its UART input queue and the terminal grid all live in
+//! linear memory: guest output goes straight into the terminal without crossing into JS. The page
+//! writes key bytes into `input`, calls run(), then redraws the rows marked dirty.
 
 const std = @import("std");
-const options = @import("build_options");
-const is64 = options.machine64;
-const cpu = if (is64) @import("rv64.zig") else @import("cpu.zig");
+const cpu = @import("rv64.zig");
 const m64 = @import("machine64.zig");
 const vt_mod = @import("vt.zig");
 const inflate = @import("inflate.zig");
 
 pub const panic = std.debug.no_panic;
 
-const ram_size: u32 = if (is64) @as(u32, options.ram_mb) << 20 else cpu.ram_size;
-const ring_len = 4096;
-
-/// The 32-bit machine's UART is just an input queue; the 64-bit one has full device state.
-const Ring32 = extern struct {
-    in_head: u32,
-    in_tail: u32,
-    in_ring: [ring_len]u8,
-
-    fn inputAvailable(d: *const Ring32) bool {
-        return d.in_head != d.in_tail;
-    }
-    fn inputFree(d: *const Ring32) u32 {
-        return ring_len - (d.in_head -% d.in_tail);
-    }
-    fn pushInput(d: *Ring32, c: u8) void {
-        if (d.inputFree() == 0) return;
-        d.in_ring[d.in_head % ring_len] = c;
-        d.in_head +%= 1;
-    }
-    fn popInput(d: *Ring32) u8 {
-        const c = d.in_ring[d.in_tail % ring_len];
-        d.in_tail +%= 1;
-        return c;
-    }
-};
+const ram_size: u32 = m64.default_ram_size;
 
 /// Everything except RAM; snapshots save this struct as raw bytes.
 const Machine = extern struct {
     hart: cpu.Hart,
-    dev: if (is64) m64.Devices else Ring32,
+    dev: m64.Devices,
     out_count: u32, // bytes the guest has written, wrapping
     log_len: u32,
     log: [8192]u8, // raw guest output, read by the snapshot tool
@@ -72,20 +43,8 @@ const Out = struct {
     }
 };
 
-const Bus32 = struct {
-    pub inline fn uartAvailable(_: Bus32) bool {
-        return machine.dev.inputAvailable();
-    }
-    pub inline fn uartRead(_: Bus32) u8 {
-        return machine.dev.popInput();
-    }
-    pub inline fn uartWrite(_: Bus32, c: u8) void {
-        output(c);
-    }
-};
-
-fn bus() if (is64) m64.Bus(Out) else Bus32 {
-    return if (is64) .{ .dev = &machine.dev, .out = .{} } else .{};
+fn bus() m64.Bus(Out) {
+    return .{ .dev = &machine.dev, .out = .{} };
 }
 
 // Host requests. The guest has no network card, so programs like curl write a frame
@@ -149,23 +108,23 @@ fn pushByte(c: u8) void {
 export fn reset(cols: u32, rows: u32) void {
     @memset(&ram, 0);
     @memset(std.mem.asBytes(&machine), 0);
-    machine.hart.reset(if (is64) cpu.ram_base else cpu.ram_base + cpu.dtb_offset);
+    machine.hart.reset(cpu.ram_base);
     machine.vt.init(cols, rows);
 }
 
-/// 64-bit only: where the snapshot tool copies the kernel and an initrd of `len` bytes, and the
-/// call that then builds the device tree and starts the kernel.
+/// Where the snapshot tool copies the kernel and an initrd of `len` bytes, and the call that then
+/// builds the device tree and starts the kernel.
 export fn kernel_offset() u32 {
-    return if (is64) m64.kernel_offset else 0;
+    return m64.kernel_offset;
 }
 export fn initrd_offset(len: u32) u32 {
-    return if (is64) @intCast(m64.initrdOffset(ram_size, len)) else 0;
+    return @intCast(m64.initrdOffset(ram_size, len));
 }
 export fn boot_linux(initrd_len: u32) void {
-    if (is64) m64.bootPlaced(&machine.hart, &machine.dev, &ram, initrd_len, "console=ttyS0 rdinit=/init quiet", &entropy);
+    m64.bootPlaced(&machine.hart, &machine.dev, &ram, initrd_len, "console=ttyS0 rdinit=/init quiet", &entropy);
 }
 
-/// 64-bit only: the page fills this with random bytes (crypto.getRandomValues) before each
+/// The page fills this with random bytes (crypto.getRandomValues) before each
 /// boot_linux() and restore_snapshot(). Booting seeds Linux's random number generator with it; a
 /// restore hands the guest a new VM generation ID, so every copy of a snapshot reseeds instead of
 /// replaying the same "random" numbers.
@@ -176,7 +135,7 @@ export fn entropy_ptr() [*]u8 {
 
 // Snapshot restore, done here with the small decoder in inflate.zig rather than in JS, so it
 // works on engines without DecompressionStream (Chromium < 80).
-// Format (gzipped), written by tools/mksnapshot.mjs:
+// Format (gzipped), written by tools/snapshot.mjs:
 //   "RVSNAP03", u32 machine_len, u32 ram_len, u32 unique_count, u32 map_count, the machine bytes,
 //   map_count records of (u32 page index, u32 unique page) sorted by unique page, then the unique
 //   4 KB pages in order. The map comes first so each page inflates straight into RAM.
@@ -213,10 +172,8 @@ fn restore() !void {
     var r: Restorer = .{};
     try inflate.gunzip(snapshot, &window, &r);
     if (!r.complete()) return error.Damaged;
-    if (is64) {
-        cpu.flushTlb(); // cached translations belong to whatever ran before
-        machine.dev.newGeneration(entropy[48..64].*);
-    }
+    cpu.flushTlb(); // cached translations belong to whatever ran before
+    machine.dev.newGeneration(entropy[48..64].*);
 }
 
 fn ramPage(index: u32) !*[page_len]u8 {
@@ -315,7 +272,7 @@ export fn push_input(len: u32) void {
 
 /// Bytes the guest has not read from the UART yet.
 export fn input_pending() u32 {
-    return ring_len - machine.dev.inputFree();
+    return machine.dev.in_head -% machine.dev.in_tail;
 }
 
 export fn input_free() u32 {
@@ -334,9 +291,6 @@ export fn ram_ptr() [*]u8 {
 }
 export fn ram_len() u32 {
     return ram_size;
-}
-export fn dtb_offset() u32 {
-    return if (is64) 0 else cpu.dtb_offset;
 }
 export fn machine_ptr() [*]u8 {
     return @ptrCast(&machine);

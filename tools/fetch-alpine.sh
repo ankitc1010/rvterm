@@ -1,15 +1,14 @@
 #!/bin/sh
 # Downloads Alpine's riscv64 minirootfs and linux-lts kernel and builds linux64/Image and an
-# initramfs for the 64-bit machine, with extra Alpine packages baked in.
+# initramfs for the machine, with extra Alpine packages baked in.
 # Usage: [INITRD=file] tools/fetch-alpine.sh [package...]   (from the project root; needs curl,
-# tar, gunzip, python3). The default is bash into linux64/initrd.cpio.gz. The Node.js image
-# (zig build -Dnode) is: INITRD=linux64/initrd-node.cpio.gz tools/fetch-alpine.sh bash coreutils grep nodejs
-# A package written npm:name@version comes from the npm registry instead (tools/npm-package.py);
-# see the README for the Claude Code image.
+# tar, gunzip, python3). The default is linux64/initrd.cpio.gz with bash, Node.js, and the GNU
+# coreutils and grep that scripts such as nvm expect. Naming packages replaces that list.
+# A package written npm:name@version comes from the npm registry instead (tools/npm-package.py).
 set -eu
 INITRD=${INITRD:-linux64/initrd.cpio.gz}
 PACKAGES= NPM=
-for p in ${*:-bash}; do
+for p in ${*:-bash coreutils grep nodejs}; do
     case "$p" in
     npm:*) NPM="$NPM ${p#npm:}" ;;
     *) PACKAGES="$PACKAGES $p" ;;

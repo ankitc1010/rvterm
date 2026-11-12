@@ -33,12 +33,6 @@ while true; do
 done
 """
 
-# Claude Code 2.1.112 is the last release written in JavaScript; later ones are native x64/arm64
-# programs, so it must not update itself. The ripgrep it bundles is for other CPUs: use Alpine's.
-CLAUDE_CODE_PROFILE = b"""# Claude Code on rvterm (see tools/mkinitrd.py)
-export DISABLE_AUTOUPDATER=1 USE_BUILTIN_RIPGREP=0
-"""
-
 # A login bash reads ~/.bash_profile, not ~/.bashrc, where tools such as nvm add themselves.
 BASH_PROFILE = b"""# Login shells read this file; keep everything in ~/.bashrc.
 [ -f ~/.bashrc ] && . ~/.bashrc
@@ -124,7 +118,6 @@ def add_npm(cpio, path, dirs):
     for cmd, target in bins.items():
         link = os.path.relpath(root + "/" + os.path.normpath(target), "usr/local/bin")
         cpio.add("usr/local/bin/" + cmd, 0o120777, link.encode())
-    return name
 
 
 def main():
@@ -132,14 +125,11 @@ def main():
     cpio = Cpio()
     members = add_tar(cpio, src)
     dirs = {m.lstrip("./") for m, info in members.items() if info.isdir()}
-    npm = []
     for pkg in packages:
         if pkg.endswith(".tgz"):
-            npm.append(add_npm(cpio, pkg, dirs))
+            add_npm(cpio, pkg, dirs)
         else:
             add_tar(cpio, pkg, skip_control=True)  # .PKGINFO, .SIGN.*, install scripts
-    if "@anthropic-ai/claude-code" in npm:
-        cpio.add("etc/profile.d/claude-code.sh", 0o100644, CLAUDE_CODE_PROFILE)
     if "dev" not in members and "./dev" not in members:
         cpio.add("dev", 0o040755)
     cpio.add("dev/console", 0o020600, rdev=(5, 1))

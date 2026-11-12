@@ -1,5 +1,5 @@
-// Shared by mksnapshot.mjs (32-bit) and mksnapshot64.mjs (64-bit Alpine): drives a guest in the
-// same wasm the page uses, then saves the machine sitting at a shell prompt.
+// The parts of mksnapshot64.mjs that do not depend on the guest: drives a guest in the same wasm
+// the page uses, then saves the machine sitting at a shell prompt.
 //
 // Snapshot format (gzipped): "RVSNAP03", u32 machine_len, u32 ram_len, u32 unique_count,
 // u32 map_count, the machine bytes, map_count records of u32 page index + u32 unique page number
